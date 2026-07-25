@@ -1,0 +1,24 @@
+{
+  "id": "nodebb-plugin-havaintokartta",
+  "name": "Havaintokartta",
+  "description": "Structured Havaintokartta report API for NodeBB",
+  "library": "library.js",
+  "settingsRoute": "/admin/plugins/havaintokartta",
+  "hooks": [
+    {
+      "hook": "static:app.load",
+      "method": "init"
+    },
+    {
+      "hook": "action:topic.delete",
+      "method": "onTopicDeleted"
+    },
+    {
+      "hook": "filter:admin.header.build",
+      "method": "addAdminNavigation"
+    }
+  ],
+  "acpScripts": [
+    "lib/admin/storage-client.js"
+  ]
+}
