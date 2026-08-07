@@ -17,10 +17,7 @@ plugin.init = async function init(params) {
     middleware.admin && middleware.admin.buildHeader,
   ].filter(Boolean);
 
-  // Defense-in-depth: explicitly attach admin privilege check to all
-  // /api/admin/* routes. NodeBB also applies this globally via router.all
-  // in src/routes/index.js, but making it explicit ensures the security
-  // contract survives future NodeBB routing changes.
+  // Explicit admin check on all /api/admin/* routes (NodeBB also does this globally).
   const adminApiGuard = [
     middleware.admin && middleware.admin.checkPrivileges,
   ].filter(Boolean);
@@ -64,10 +61,8 @@ plugin.addAdminNavigation = async function addAdminNavigation(header) {
   return header;
 };
 
-// buildTopicUrl is imported from ./lib/utils.
-// It uses forumUrl (FORUM_URL) if available, falling back to baseUrl.
-// This ensures the URL sent to Ylivieskahub for cache-clearing matches
-// the URL stored in the report at creation time.
+// buildTopicUrl uses forumUrl (FORUM_URL) if set, else baseUrl, so the
+// cache-clearing URL matches the one stored at report creation.
 
 /**
  * Hook fired when a moderator deletes a topic on NodeBB.
