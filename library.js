@@ -96,6 +96,7 @@ plugin.onTopicDeleted = async function onTopicDeleted(data) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ topicUrl }),
+      signal: AbortSignal.timeout(10_000),
     })
       .then((response) => {
         if (response.ok) {
