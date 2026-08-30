@@ -1,6 +1,6 @@
 {
   "name": "nodebb-plugin-havaintokartta",
-  "version": "1.3.9",
+  "version": "1.4.0",
   "description": "Structured Havaintokartta report API for NodeBB",
   "main": "library.js",
   "license": "UNLICENSED",
