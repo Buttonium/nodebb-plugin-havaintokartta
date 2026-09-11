@@ -10,6 +10,7 @@ const path = require('node:path');
 const Module = require('node:module');
 
 process.env.NODEBB_API_KEY = 'test-api-key-0123456789abcdef';
+process.env.NODEBB_HAVAINTOKARTTA_CATEGORY_ID = '7';
 
 // Temp uploads dir so image deletion assertions never touch real data.
 const tmpUploads = fs.mkdtempSync(path.join(os.tmpdir(), 'havaintokartta-update-test-'));
@@ -35,6 +36,7 @@ const objectStore = new Map();
 const sortedSets = new Map();
 
 const db = {
+  pool: require('./__mocks__/report-pool.cjs')(objectStore, sortedSets),
   getObject: async (key) => (objectStore.has(key) ? objectStore.get(key) : null),
   setObject: async (key, value) => {
     objectStore.set(key, value);
@@ -53,10 +55,15 @@ const db = {
 };
 
 const originalMainRequire = require.main.require;
+let replyCount = 0;
+let topicCount = 0;
 require.main.require = function stubbedMainRequire(id) {
   if (id === './src/database') return db;
-  if (id === './src/groups') return { isMember: async () => false };
-  if (id === './src/topics') return {};
+  if (id === './src/groups') return { isMember: async () => true };
+  if (id === './src/topics') return {
+    post: async () => ({ tid: ++topicCount, slug: 'test-topic' }),
+    reply: async () => { replyCount++; },
+  };
   if (id === './src/user') return { getUserFields: async () => ({ username: 'testuser' }) };
   return originalMainRequire.call(this, id);
 };
@@ -267,6 +274,79 @@ test('does not delete removed image files when saving the update fails', async (
   fs.accessSync(keep2Path);
   const after = await store.getReport(report.id);
   assert.deepEqual(JSON.parse(after.images), [SAVEFAIL_IMG1, SAVEFAIL_IMG2]);
+});
+
+test('review landing after the last read is not overwritten and removed images survive', async () => {
+  const file = path.join(tmpUploads, 'files', 'reports', '2026-09-01', 'atomic.jpg');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'keep');
+  const image = `${PREFIX}/2026-09-01/atomic.jpg`;
+  const report = await makeReport({ images: [image, IMG2] });
+  db.pool.beforeUpdate = async () => {
+    const current = await store.getReport(report.id);
+    await store.saveReport({ ...current, stage: 2, public: true, tid: 42 }, current);
+  };
+  await assert.rejects(reports.updateReport(report.id, { actorUid: '1', images: [IMG2] }), err => err.status === 409);
+  const saved = await store.getReport(report.id);
+  assert.equal(saved.stage, 2);
+  assert.equal(saved.tid, 42);
+  assert.deepEqual(JSON.parse(saved.images), [image, IMG2]);
+  fs.accessSync(file);
+});
+
+test('same-millisecond saves conflict through revision rather than timestamps', async () => {
+  const report = await makeReport();
+  const winner = await store.saveReport({ ...report, description: 'winner' }, report);
+  assert.equal(winner.updatedAt, report.updatedAt);
+  await assert.rejects(store.saveReport({ ...report, description: 'loser' }, report), err => err.status === 409);
+  assert.equal((await store.getReport(report.id)).description, 'winner');
+});
+
+test('a concurrent edit wins against a stale review without deleting images or posting a reply', async () => {
+  const image = `${PREFIX}/2026-09-01/review-conflict.jpg`;
+  const file = path.join(tmpUploads, 'files', 'reports', '2026-09-01', 'review-conflict.jpg');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'keep');
+  const report = await makeReport({ images: [image] });
+  await store.saveReport({ ...report, tid: 42 }, report);
+  db.pool.beforeUpdate = async () => {
+    const current = await store.getReport(report.id);
+    await store.saveReport({ ...current, description: 'newer edit' }, current);
+  };
+  const before = replyCount;
+  await assert.rejects(reports.reviewReport(report.id, { actorUid: '2', publishImage: false }), err => err.status === 409);
+  const saved = await store.getReport(report.id);
+  assert.equal(saved.stage, 1);
+  assert.equal(saved.description, 'newer edit');
+  assert.equal(replyCount, before);
+  fs.accessSync(file);
+});
+
+test('review uses the revision returned by topic-link persistence and completion uses CAS', async () => {
+  const report = await makeReport();
+  const before = replyCount;
+  const reviewed = await reports.reviewReport(report.id, { actorUid: '2', publishImage: true });
+  assert.equal(reviewed.stage, 2);
+  assert.ok(reviewed.tid);
+  assert.ok(reviewed.revision);
+  assert.equal(replyCount, before + 1);
+  const done = await reports.markReportDone(report.id, { actorUid: '2', doneComment: 'done' });
+  assert.equal(done.stage, 3);
+  assert.notEqual(done.revision, reviewed.revision);
+  await assert.rejects(reports.markReportDone(report.id, { actorUid: '2' }), err => err.status === 409);
+  assert.equal(replyCount, before + 2);
+});
+
+test('stale completion cannot overwrite another completion or duplicate its reply', async () => {
+  const report = await makeReport({ stage: 2 });
+  db.pool.beforeUpdate = async () => {
+    const current = await store.getReport(report.id);
+    await store.saveReport({ ...current, stage: 3, doneComment: 'winner' }, current);
+  };
+  const before = replyCount;
+  await assert.rejects(reports.markReportDone(report.id, { actorUid: '2' }), err => err.status === 409);
+  assert.equal((await store.getReport(report.id)).doneComment, 'winner');
+  assert.equal(replyCount, before);
 });
 
 test.after((t) => {
