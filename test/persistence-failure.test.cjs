@@ -25,6 +25,7 @@ function fixture(kind) {
   const db = {
     setObject: (key, value) => write(() => objects.set(key, { ...value })),
     getObject: async key => objects.get(key) || null,
+    getObjects: async keys => keys.map(key => objects.get(key) || null),
     sortedSetAdd: (key, score, id) => write(() => {
       if (!sets.has(key)) sets.set(key, new Map());
       sets.get(key).set(id, score);
