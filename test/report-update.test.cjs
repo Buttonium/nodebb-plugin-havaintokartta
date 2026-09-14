@@ -11,6 +11,7 @@ const Module = require('node:module');
 
 process.env.NODEBB_API_KEY = 'test-api-key-0123456789abcdef';
 process.env.NODEBB_HAVAINTOKARTTA_CATEGORY_ID = '7';
+process.env.HAVAINTOKARTTA_APP_URL = 'https://havaintokartta.example';
 
 // Temp uploads dir so image deletion assertions never touch real data.
 const tmpUploads = fs.mkdtempSync(path.join(os.tmpdir(), 'havaintokartta-update-test-'));
@@ -58,6 +59,7 @@ const originalMainRequire = require.main.require;
 let replyCount = 0;
 let topicCount = 0;
 const topicPosts = [];
+const topicReplies = [];
 require.main.require = function stubbedMainRequire(id) {
   if (id === './src/database') return db;
   if (id === './src/groups') return { isMember: async () => true };
@@ -66,7 +68,10 @@ require.main.require = function stubbedMainRequire(id) {
       topicPosts.push(data);
       return { tid: ++topicCount, slug: 'test-topic' };
     },
-    reply: async () => { replyCount++; },
+    reply: async (data) => {
+      replyCount++;
+      topicReplies.push(data);
+    },
   };
   if (id === './src/user') return { getUserFields: async () => ({ username: 'testuser' }) };
   return originalMainRequire.call(this, id);
@@ -403,6 +408,81 @@ test('forum topic is authored by the reviewing operator, not the report creator'
   await reports.reviewReport(report.id, { actorUid: '2', reviewComment: 'Ok', publishImage: true });
   assert.equal(topicPosts.length, before + 1);
   assert.equal(topicPosts.at(-1).uid, 2);
+});
+
+test('opening post follows the curated report format', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1], title: 'Roskaa puistossa' });
+  const before = topicPosts.length;
+  await reports.reviewReport(report.id, { actorUid: '2', publishImage: true });
+  assert.equal(topicPosts.length, before + 1);
+  assert.match(
+    topicPosts.at(-1).content,
+    /^Havaintokartta-ilmoitus: Roskaa puistossa\nLuotu: \d{1,2}\.\d{1,2}\.\d{4}\n\nIlmoittajan viesti:\nAlkuperäinen kuvaus\n\nKuvia mukana: 1 kpl$/
+  );
+});
+
+test('opening post falls back to a bare heading for legacy reports without a title', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+  await reports.reviewReport(report.id, { actorUid: '2', publishImage: true });
+  assert.match(topicPosts.at(-1).content, /^Havaintokartta-ilmoitus\nLuotu: /);
+});
+
+test('review reply follows the curated format and omits an empty comment block', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+  await reports.reviewReport(report.id, { actorUid: '2', publishImage: true });
+  assert.equal(
+    topicReplies.at(-1).content,
+    'Havaintokartta-ilmoitus on tarkistettu.\n\n'
+      + 'Käsittelijä: testuser\n'
+      + 'Julkinen kartalla: kyllä\n'
+      + 'Kuvan julkaisu: kyllä\n\n'
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+  );
+});
+
+test('review reply appends the comment block when a comment is given', async () => {
+  const report = await makeReport({ creatorUid: '1' });
+  await reports.reviewReport(report.id, {
+    actorUid: '2',
+    reviewComment: 'Ilmoitettu kaupungille',
+    publishImage: false,
+  });
+  assert.equal(
+    topicReplies.at(-1).content,
+    'Havaintokartta-ilmoitus on tarkistettu.\n\n'
+      + 'Käsittelijä: testuser\n'
+      + 'Julkinen kartalla: kyllä\n'
+      + 'Kuvan julkaisu: ei\n\n'
+      + 'Käsittelyn kommentti:\n'
+      + 'Ilmoitettu kaupungille\n\n'
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+  );
+});
+
+test('done reply follows the curated format', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+  await reports.reviewReport(report.id, { actorUid: '2', publishImage: true });
+  await reports.markReportDone(report.id, { actorUid: '2', doneComment: 'Korjattu' });
+  assert.equal(
+    topicReplies.at(-1).content,
+    'Havaintokartta-ilmoitus on merkitty valmiiksi.\n\n'
+      + 'Käsittelijä: testuser\n\n'
+      + 'Valmistumiskommentti:\n'
+      + 'Korjattu\n\n'
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+  );
+});
+
+test('done reply omits the comment block when no comment is given', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+  await reports.reviewReport(report.id, { actorUid: '2', publishImage: true });
+  await reports.markReportDone(report.id, { actorUid: '2' });
+  assert.equal(
+    topicReplies.at(-1).content,
+    'Havaintokartta-ilmoitus on merkitty valmiiksi.\n\n'
+      + 'Käsittelijä: testuser\n\n'
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+  );
 });
 
 test.after((t) => {
