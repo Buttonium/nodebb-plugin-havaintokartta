@@ -57,11 +57,15 @@ const db = {
 const originalMainRequire = require.main.require;
 let replyCount = 0;
 let topicCount = 0;
+const topicPosts = [];
 require.main.require = function stubbedMainRequire(id) {
   if (id === './src/database') return db;
   if (id === './src/groups') return { isMember: async () => true };
   if (id === './src/topics') return {
-    post: async () => ({ tid: ++topicCount, slug: 'test-topic' }),
+    post: async (data) => {
+      topicPosts.push(data);
+      return { tid: ++topicCount, slug: 'test-topic' };
+    },
     reply: async () => { replyCount++; },
   };
   if (id === './src/user') return { getUserFields: async () => ({ username: 'testuser' }) };
@@ -77,12 +81,13 @@ const IMG2 = `${PREFIX}/2026-09-01/two.jpg`;
 const NEW_IMG = `${PREFIX}/2026-09-07/three.jpg`;
 const NEW_IMG_ABSOLUTE = 'https://forum.example/assets/uploads/files/reports/2026-09-07/three.jpg';
 
-async function makeReport({ creatorUid = '1', stage = 1, images = null } = {}) {
+async function makeReport({ creatorUid = '1', stage = 1, images = null, title = null } = {}) {
   const created = await reports.createReport({
     creatorUid,
     citySlug: 'ylivieska',
     lat: 64.08,
     lng: 24.53,
+    title,
     description: 'Alkuperäinen kuvaus',
     images: images ? JSON.stringify(images) : null,
   });
@@ -347,6 +352,57 @@ test('stale completion cannot overwrite another completion or duplicate its repl
   await assert.rejects(reports.markReportDone(report.id, { actorUid: '2' }), err => err.status === 409);
   assert.equal((await store.getReport(report.id)).doneComment, 'winner');
   assert.equal(replyCount, before);
+});
+
+test('stores the sanitized report title from the create payload', async () => {
+  const created = await reports.createReport({
+    creatorUid: '1',
+    citySlug: 'ylivieska',
+    lat: 64.081,
+    lng: 24.531,
+    title: '  Katulamppu   pimeänä  ',
+    description: 'Kuvaus',
+  });
+  assert.equal(created.title, 'Katulamppu pimeänä');
+});
+
+test('stores an empty title for legacy create payloads without one', async () => {
+  const report = await makeReport();
+  assert.equal(report.title, '');
+});
+
+test('updates the report title for the creator and rejects a blank title', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+  const updated = await reports.updateReport(report.id, { actorUid: '1', title: 'Uusi otsikko' });
+  assert.equal(updated.title, 'Uusi otsikko');
+  // A title-only update must not touch the description or the images.
+  assert.equal(updated.description, 'Alkuperäinen kuvaus');
+  assert.deepEqual(JSON.parse(updated.images), [IMG1]);
+
+  await assert.rejects(
+    () => reports.updateReport(report.id, { actorUid: '1', title: '   ' }),
+    (err) => err.status === 400
+  );
+});
+
+test('forum topic title uses the report title, not the description preview', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1], title: 'Roskaa puistossa' });
+  await reports.reviewReport(report.id, { actorUid: '2', reviewComment: 'Ok', publishImage: true });
+  assert.equal(topicPosts.at(-1).title, '[Havaintokartta] [ylivieska] Roskaa puistossa');
+});
+
+test('forum topic title falls back to the description preview for legacy reports', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+  await reports.reviewReport(report.id, { actorUid: '2', reviewComment: 'Ok', publishImage: true });
+  assert.equal(topicPosts.at(-1).title, '[Havaintokartta] [ylivieska] Alkuperäinen kuvaus');
+});
+
+test('forum topic is authored by the reviewing operator, not the report creator', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+  const before = topicPosts.length;
+  await reports.reviewReport(report.id, { actorUid: '2', reviewComment: 'Ok', publishImage: true });
+  assert.equal(topicPosts.length, before + 1);
+  assert.equal(topicPosts.at(-1).uid, 2);
 });
 
 test.after((t) => {
