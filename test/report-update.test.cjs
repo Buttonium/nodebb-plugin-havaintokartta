@@ -485,6 +485,154 @@ test('done reply omits the comment block when no comment is given', async () => 
   );
 });
 
+test('rejects foreign hosts that mimic the reports upload path', async () => {
+  const report = await makeReport({ creatorUid: '1', images: [IMG1] });
+
+  await assert.rejects(
+    () => reports.updateReport(report.id, {
+      actorUid: '1',
+      images: [IMG1, 'https://evil.example/assets/uploads/files/reports/2026-09-07/x.jpg'],
+    }),
+    (err) => err.status === 400
+  );
+
+  // Protocol-relative URLs resolve to a foreign origin.
+  await assert.rejects(
+    () => reports.updateReport(report.id, {
+      actorUid: '1',
+      images: [IMG1, '//evil.example/assets/uploads/files/reports/2026-09-07/x.jpg'],
+    }),
+    (err) => err.status === 400
+  );
+
+  // The forum origin itself remains accepted.
+  const updated = await reports.updateReport(report.id, {
+    actorUid: '1',
+    images: [IMG1, NEW_IMG_ABSOLUTE],
+  });
+  assert.deepEqual(JSON.parse(updated.images), [IMG1, NEW_IMG_ABSOLUTE]);
+});
+
+test('create only accepts report upload references', async () => {
+  const base = {
+    creatorUid: '1',
+    lat: 64.08,
+    lng: 24.53,
+    description: 'Kuvaus',
+  };
+
+  await assert.rejects(
+    () => reports.createReport({
+      ...base,
+      images: ['https://evil.example/assets/uploads/files/reports/2026-09-07/x.jpg'],
+    }),
+    (err) => err.status === 400
+  );
+
+  await assert.rejects(
+    () => reports.createReport({ ...base, images: ['/assets/uploads/files/news/2026-09-07/x.jpg'] }),
+    (err) => err.status === 400
+  );
+
+  // Dot segments must not let a relative path resolve outside the namespace.
+  await assert.rejects(
+    () => reports.createReport({
+      ...base,
+      images: ['/assets/uploads/files/reports/../news/2026-09-07/x.jpg'],
+    }),
+    (err) => err.status === 400
+  );
+
+  // Encoded dot segments are just as unreadable and resolve the same way.
+  await assert.rejects(
+    () => reports.createReport({
+      ...base,
+      images: ['/assets/uploads/files/reports/%2e%2e/news/2026-09-07/x.jpg'],
+    }),
+    (err) => err.status === 400
+  );
+
+  const created = await reports.createReport({ ...base, images: [NEW_IMG_ABSOLUTE] });
+  assert.deepEqual(JSON.parse(created.images), [NEW_IMG_ABSOLUTE]);
+});
+
+test('rejects out-of-range coordinates on create and duplicate checks', async () => {
+  const base = {
+    creatorUid: '1',
+    citySlug: 'ylivieska',
+    description: 'Kuvaus',
+  };
+
+  await assert.rejects(
+    () => reports.createReport({ ...base, lat: 999, lng: 24.53 }),
+    (err) => err.status === 400
+  );
+
+  await assert.rejects(
+    () => reports.createReport({ ...base, lat: 64.08, lng: -181 }),
+    (err) => err.status === 400
+  );
+
+  await assert.rejects(
+    () => reports.checkDuplicateCoordinate(91, 24.53),
+    (err) => err.status === 400
+  );
+
+  await assert.rejects(
+    () => reports.checkDuplicateCoordinate(64.08, 181),
+    (err) => err.status === 400
+  );
+
+  const created = await reports.createReport({ ...base, lat: 64.08, lng: 24.53 });
+  assert.equal(created.lat, 64.08);
+  assert.equal(created.lng, 24.53);
+});
+
+test('drops out-of-range stored coordinates when reading reports', async () => {
+  const now = new Date().toISOString();
+  await store.saveReport({
+    id: 'corrupt-coordinates',
+    lat: 999,
+    lng: 24.53,
+    stage: 1,
+    creatorUid: '1',
+    public: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const report = await store.getReport('corrupt-coordinates');
+  assert.equal(report.lat, null);
+  assert.equal(report.lng, 24.53);
+});
+
+test('grandfathers legacy stored image references when they are kept', async () => {
+  const legacy = 'https://legacy.example/assets/uploads/files/reports/2026-09-01/old.jpg';
+  const now = new Date().toISOString();
+  const created = await store.saveReport({
+    id: 'legacy-image-report',
+    creatorUid: '1',
+    images: JSON.stringify([legacy]),
+    stage: 1,
+    public: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  // Keeping an already-stored reference stays allowed, so legacy reports
+  // remain editable; adding a new foreign reference is still rejected.
+  const updated = await reports.updateReport(created.id, { actorUid: '1', images: [legacy] });
+  assert.deepEqual(JSON.parse(updated.images), [legacy]);
+
+  await assert.rejects(
+    () => reports.updateReport(created.id, {
+      actorUid: '1',
+      images: [legacy, 'https://evil.example/assets/uploads/files/reports/2026-09-07/new.jpg'],
+    }),
+    (err) => err.status === 400
+  );
+});
+
 test.after((t) => {
   require.main.require = originalMainRequire;
   Module._load = originalLoad;

@@ -198,3 +198,26 @@ test('hidden files and files created after scanning survive empty directory clea
   await fs.access(path.join(base, 'empty', 'new.jpg'));
   await fs.access(path.join(base, 'hidden', '.keep'));
 });
+
+test('corrupt report image references abort scans with an actionable error and protect files', async t => {
+  const f = await fixture(t);
+  const file = await f.file('havaintokartta', 'old.jpg');
+
+  // Malformed JSON fails closed and names the offending row.
+  f.state.reports = [{ id: 'r1', images: '[broken' }];
+  await assert.rejects(f.scanOrphans(), (err) => /report r1/.test(err.message));
+
+  // A JSON-like non-array value is just as unreadable and must not be skipped.
+  f.state.reports = [{ id: 'r2', images: '{"a":1}' }];
+  await assert.rejects(f.scanOrphans(), (err) => /report r2/.test(err.message));
+
+  // A JSON-encoded scalar hides its references just as effectively.
+  f.state.reports = [{ id: 'r3', images: JSON.stringify(f.url('havaintokartta', 'old.jpg')) }];
+  await assert.rejects(f.scanOrphans(), (err) => /report r3/.test(err.message));
+
+  // Deletion must still refuse to touch the file while references are unknown.
+  const result = await f.deleteOrphans('havaintokartta', ['old.jpg']);
+  assert.equal(result.failed, 1);
+  assert.equal(result.deleted, 0);
+  await fs.access(file);
+});
