@@ -73,7 +73,7 @@ test('revocation requires authentic unexpired tokens and caps their TTL', () => 
   assert.equal(sso.parseTokenForRevocation(valid.split('.')[0] + '.forged'), null);
   assert.equal(sso.parseTokenForRevocation(sign(Date.now() - 1000)), null);
   assert.equal(sso.parseTokenForRevocation('x'.repeat(8193)), null);
-  assert.equal(sso.parseTokenForRevocation(sign(Date.now() + 100 * 365 * 86400_000)).remainingTtlSeconds, sso.APP_SESSION_TTL_SECONDS);
+  assert.equal(sso.parseTokenForRevocation(sign(Date.now() + 100 * 365 * 86400_000)), null);
 });
 
 const REVOKE_KEY = (sig) =>
