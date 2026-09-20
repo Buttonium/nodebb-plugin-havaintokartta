@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const Module = require('node:module');
 
 process.env.NODEBB_API_KEY = 'test-api-key-0123456789abcdef';
+process.env.APP_SESSION_SECRET = 'test-session-secret-for-revocation';
 
 // Distinct groups per role so each role's membership is independently
 // controllable (config is read from env on first getConfig() call).
@@ -61,6 +62,19 @@ require.main.require = function stubbedMainRequire(id) {
 };
 
 const sso = require('../lib/sso.js');
+
+test('revocation requires authentic unexpired tokens and caps their TTL', () => {
+  function sign(exp) {
+    const body = Buffer.from(JSON.stringify({ exp })).toString('base64url');
+    return `${body}.${crypto.createHmac('sha256', process.env.APP_SESSION_SECRET).update(body).digest('base64url')}`;
+  }
+  const valid = sign(Date.now() + 60_000);
+  assert.ok(sso.parseTokenForRevocation(valid));
+  assert.equal(sso.parseTokenForRevocation(valid.split('.')[0] + '.forged'), null);
+  assert.equal(sso.parseTokenForRevocation(sign(Date.now() - 1000)), null);
+  assert.equal(sso.parseTokenForRevocation('x'.repeat(8193)), null);
+  assert.equal(sso.parseTokenForRevocation(sign(Date.now() + 100 * 365 * 86400_000)).remainingTtlSeconds, sso.APP_SESSION_TTL_SECONDS);
+});
 
 const REVOKE_KEY = (sig) =>
   `havaintokartta:revoke:${crypto.createHash('sha256').update(sig).digest('hex')}`;
