@@ -39,6 +39,14 @@ const sortedSets = new Map();
 const db = {
   pool: require('./__mocks__/report-pool.cjs')(objectStore, sortedSets),
   getObject: async (key) => (objectStore.has(key) ? objectStore.get(key) : null),
+  getObjects: async (keys) => keys.map(key => objectStore.get(key) || null),
+  incrObjectField: async (key, field) => {
+    const object = { ...(objectStore.get(key) || {}) };
+    const count = Number(object[field] || 0) + 1;
+    object[field] = String(count);
+    objectStore.set(key, object);
+    return count;
+  },
   setObject: async (key, value) => {
     objectStore.set(key, value);
   },
@@ -79,6 +87,83 @@ require.main.require = function stubbedMainRequire(id) {
 
 const reports = require('../lib/reports.js');
 const store = require('../lib/store.js');
+const slugs = require('../lib/report-slugs.js');
+
+test('existing UUID, public and own report reads work if URL migration cannot write', async t => {
+  const warning = t.mock.method(console, 'warn', () => {});
+  const id = '11111111-1111-4111-8111-111111111111';
+  const raw = { id, creatorUid: '7', title: 'Vanha ilmoitus', description: 'Legacy content',
+    stage: '2', public: '1', moderationStatus: 'approved', lat: '64.0800', lng: '24.5300',
+    createdAt: '2026-01-01', updatedAt: '2026-02-01' };
+  objectStore.set(`havaintokartta:report:${id}`, { ...raw });
+  sortedSets.set('havaintokartta:reports:all', new Map([[id, 1]]));
+  sortedSets.set('havaintokartta:reports:public', new Map([[id, 1]]));
+  sortedSets.set('havaintokartta:reports:user:7', new Map([[id, 1]]));
+  const pool = db.pool;
+  db.pool = undefined;
+  try {
+    const publicReports = await reports.getPublicReports();
+    await slugs.ensureLegacyReportSlugs();
+    assert.equal(publicReports.some(report => report.id === id), true);
+    assert.equal((await reports.getSingleReport(id)).id, id);
+    assert.equal((await reports.getMineReports('7')).some(report => report.id === id), true);
+    assert.deepEqual(objectStore.get(`havaintokartta:report:${id}`), raw);
+    assert.equal(warning.mock.callCount(), 1);
+  } finally { db.pool = pool; }
+});
+
+test('URL backfill adds only slug/revision and preserves raw legacy data and list ordering', async () => {
+  const id = '22222222-2222-4222-8222-222222222222';
+  const raw = { id, title: 'Arkistoitu havainto', creatorUid: '7', public: '1', revision: '',
+    description: '  Original legacy formatting\n', lat: '64.080000', lng: '24.530000',
+    images: '["/legacy/image.jpg"]', createdAt: '2025-01-01', extraMetadata: 'keep this' };
+  objectStore.set(`havaintokartta:report:${id}`, { ...raw });
+  const beforeIndexes = new Map([...sortedSets].map(([key, entries]) => [key, new Map(entries)]));
+  const saved = await slugs.ensureReportSlug(await store.getReport(id));
+  assert.equal(saved.slug, 'arkistoitu-havainto');
+  const persisted = { ...objectStore.get(`havaintokartta:report:${id}`) };
+  delete persisted.slug;
+  persisted.revision = raw.revision;
+  assert.deepEqual(persisted, raw);
+  assert.deepEqual(sortedSets, beforeIndexes);
+});
+
+test('slug-index failure does not prevent creating or reading a report by UUID', async t => {
+  const increment = db.incrObjectField;
+  t.mock.method(console, 'warn', () => {});
+  db.incrObjectField = async () => { throw new Error('Slug index unavailable'); };
+  try {
+    const report = await reports.createReport({ creatorUid: '1', lat: 64.08, lng: 24.53,
+      title: 'UUID fallback', description: 'Report creation remains available.' });
+    assert.equal(report.slug, undefined);
+    assert.equal((await reports.getSingleReport(report.id)).id, report.id);
+  } finally { db.incrObjectField = increment; }
+});
+
+test('report UUID and title slug resolve the same persisted report', async () => {
+  const report = await reports.createReport({ creatorUid: '1', lat: 64.08, lng: 24.53,
+    title: 'Vaarallinen silta', description: 'Silta on vaarallinen.' });
+  assert.equal(report.slug, 'vaarallinen-silta');
+  assert.equal((await reports.getSingleReport(report.id)).id, report.id);
+  assert.equal((await reports.getSingleReport(report.slug)).id, report.id);
+  assert.equal((await reports.getSingleReportBySlug(report.slug)).id, report.id);
+  const updated = await reports.updateReport(report.id, { actorUid: '1', title: 'Korjattava silta' });
+  assert.equal(updated.title, 'Korjattava silta');
+  assert.equal(updated.slug, report.slug);
+  assert.equal((await reports.getSingleReport(report.slug)).title, 'Korjattava silta');
+  assert.equal((await reports.getMineReports('1')).some(r => r.slug === report.slug), true);
+});
+
+test('slug reads support titles matching reserved collection API names', async () => {
+  for (const title of ['Public', 'Mine', 'All', 'Actors', 'Stats']) {
+    const report = await reports.createReport({ creatorUid: '1', lat: 64.08, lng: 24.53,
+      title, description: 'API name collision regression' });
+    assert.equal(report.slug, title.toLowerCase());
+    assert.equal((await reports.getSingleReportBySlug(report.slug)).id, report.id);
+  }
+  await assert.rejects(reports.getSingleReportBySlug('../stats'), err => err.status === 404);
+  await assert.rejects(reports.getSingleReportBySlug('unknown-slug'), err => err.status === 404);
+});
 
 const PREFIX = '/assets/uploads/files/reports';
 const IMG1 = `${PREFIX}/2026-09-01/one.jpg`;
@@ -436,7 +521,7 @@ test('review reply follows the curated format and omits an empty comment block',
       + 'Käsittelijä: testuser\n'
       + 'Julkinen kartalla: kyllä\n'
       + 'Kuvan julkaisu: kyllä\n\n'
-      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.slug}`
   );
 });
 
@@ -455,7 +540,7 @@ test('review reply appends the comment block when a comment is given', async () 
       + 'Kuvan julkaisu: ei\n\n'
       + 'Käsittelyn kommentti:\n'
       + 'Ilmoitettu kaupungille\n\n'
-      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.slug}`
   );
 });
 
@@ -469,7 +554,7 @@ test('done reply follows the curated format', async () => {
       + 'Käsittelijä: testuser\n\n'
       + 'Valmistumiskommentti:\n'
       + 'Korjattu\n\n'
-      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.slug}`
   );
 });
 
@@ -481,7 +566,7 @@ test('done reply omits the comment block when no comment is given', async () => 
     topicReplies.at(-1).content,
     'Havaintokartta-ilmoitus on merkitty valmiiksi.\n\n'
       + 'Käsittelijä: testuser\n\n'
-      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.id}`
+      + `Ilmoitus: https://havaintokartta.example/ilmoitus/${report.slug}`
   );
 });
 

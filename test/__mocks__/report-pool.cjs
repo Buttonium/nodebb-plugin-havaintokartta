@@ -18,7 +18,7 @@ module.exports = function reportPool(objects, indexes) {
           originalIndexes = new Map([...indexes].map(([k, v]) => [k, new Map(v)]));
           const [key, json, revision, stage, updatedAt] = values;
           const current = objects.get(key);
-          if (!current || (current.revision || '') !== revision || current.stage !== stage || (current.updatedAt || '') !== updatedAt) return { rows: [] };
+          if (!current || (current.revision || '') !== revision || (current.stage || '') !== stage || (current.updatedAt || '') !== updatedAt) return { rows: [] };
           objects.set(key, { ...current, ...JSON.parse(json) });
           return { rows: [{ _key: key }] };
         }
